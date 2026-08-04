@@ -1,12 +1,14 @@
 import type {
   ModelDeclaration,
   ModelMember,
+  CommentMember,
   SchemaArgument,
   SchemaAttribute,
   SchemaDeclaration,
   SchemaField,
   SchemaProjectSnapshot,
   SchemaTypeRef,
+  SchemaValue,
   VirtualSchemaFile,
 } from './types'
 import { findAttribute } from './values'
@@ -17,6 +19,7 @@ export type SchemaMutationResult =
       readonly ok: true
       readonly files: readonly VirtualSchemaFile[]
       readonly focusName?: string
+      readonly declarationIdRemap?: Readonly<Record<string, string>>
     }
   | { readonly ok: false; readonly message: string }
 
@@ -118,8 +121,25 @@ function uniqueFieldName(model: ModelDeclaration, preferred: string): string {
   return `${preferred}${index}`
 }
 
+function uniqueRelationName(preferred: string, usedNames: ReadonlySet<string>): string {
+  if (!usedNames.has(preferred)) return preferred
+  let index = 2
+  while (usedNames.has(`${preferred}${index}`)) index += 1
+  return `${preferred}${index}`
+}
+
 function lowerFirst(value: string): string {
   return value ? `${value[0]?.toLowerCase() ?? ''}${value.slice(1)}` : value
+}
+
+function detachedComments(
+  member: Pick<SchemaField, 'leadingComments' | 'trailingComment'>,
+): CommentMember | undefined {
+  const comments = [
+    ...(member.leadingComments ?? []),
+    ...(member.trailingComment ? [member.trailingComment] : []),
+  ]
+  return comments.length ? { kind: 'commentBlock', comments } : undefined
 }
 
 export function addModelToProject(
@@ -204,6 +224,9 @@ export function renameModelInProject(
     ok: true,
     files: rewriteFiles(snapshot, declarations),
     focusName: normalizedName,
+    declarationIdRemap: {
+      [model.id]: `${model.kind}:${model.source.filePath}:${normalizedName}`,
+    },
   }
 }
 
@@ -257,10 +280,10 @@ export interface UpdateFieldPatch {
 }
 
 function replaceValuePath(
-  value: import('./types').SchemaValue,
+  value: SchemaValue,
   previous: string,
   next: string,
-): import('./types').SchemaValue {
+): SchemaValue {
   if (value.kind === 'path') {
     return {
       ...value,
@@ -283,6 +306,107 @@ function replaceValuePath(
     }
   }
   return value
+}
+
+function replaceRelationArgumentPaths(
+  attribute: SchemaAttribute,
+  previous: string,
+  next: string,
+  argumentNames: ReadonlySet<string>,
+): SchemaAttribute {
+  return attribute.path.join('.') === 'relation'
+    ? replaceAttributePath(attribute, previous, next, argumentNames)
+    : attribute
+}
+
+function valueReferencesField(value: SchemaValue, fieldName: string): boolean {
+  if (value.kind === 'path') {
+    return value.value.length === 1 && value.value[0] === fieldName
+  }
+  if (value.kind === 'array') {
+    return value.items.some((item) => valueReferencesField(item, fieldName))
+  }
+  if (value.kind === 'functionCall') {
+    return value.path.length === 1 && value.path[0] === fieldName
+  }
+  return false
+}
+
+const PROTECTED_BLOCK_CONSTRAINTS = new Map([
+  ['id', '@@id'],
+  ['unique', '@@unique'],
+  ['index', '@@index'],
+  ['fulltext', '@@fulltext'],
+])
+
+function replaceBlockSelectorPath(
+  value: SchemaValue,
+  previous: string,
+  next: string,
+): SchemaValue {
+  if (value.kind === 'path') {
+    return value.value.length === 1 && value.value[0] === previous
+      ? { ...value, value: [next] }
+      : value
+  }
+  if (value.kind === 'array') {
+    return {
+      ...value,
+      items: value.items.map((item) => replaceBlockSelectorPath(item, previous, next)),
+    }
+  }
+  if (value.kind === 'functionCall') {
+    return value.path.length === 1 && value.path[0] === previous
+      ? { ...value, path: [next] }
+      : value
+  }
+  return value
+}
+
+function replaceBlockConstraintSelectorPaths(
+  attribute: SchemaAttribute,
+  previous: string,
+  next: string,
+): SchemaAttribute {
+  if (!PROTECTED_BLOCK_CONSTRAINTS.has(attribute.path.join('.'))) return attribute
+  return {
+    ...attribute,
+    args: attribute.args.map((argument) =>
+      argument.name && argument.name !== 'fields'
+        ? argument
+        : {
+            ...argument,
+            value: replaceBlockSelectorPath(argument.value, previous, next),
+          },
+    ),
+  }
+}
+
+function fieldConstraintName(
+  model: ModelDeclaration,
+  field: SchemaField,
+): string | undefined {
+  if (findAttribute(field.attributes, 'id')) return '@id'
+
+  for (const member of model.members) {
+    if (member.kind !== 'blockAttribute') continue
+    const constraintName = PROTECTED_BLOCK_CONSTRAINTS.get(
+      member.attribute.path.join('.'),
+    )
+    if (!constraintName) continue
+    const fieldArguments = member.attribute.args.filter(
+      (argument) => !argument.name || argument.name === 'fields',
+    )
+    if (
+      fieldArguments.some((argument) =>
+        valueReferencesField(argument.value, field.name),
+      )
+    ) {
+      return constraintName
+    }
+  }
+
+  return undefined
 }
 
 function replaceAttributePath(
@@ -334,16 +458,17 @@ export function updateFieldInProject(
 
   const declarations = snapshot.graph.declarations.map((declaration) => {
     if (!isModel(declaration)) return declaration
-    const pointsToRenamedModel = declaration.members.some(
-      (member) => member.kind === 'field' && member.type.name === model.name,
-    )
     const members = declaration.members.map((member): ModelMember => {
       if (member.kind === 'commentBlock') return member
       if (member.kind === 'blockAttribute') {
         return declaration.id === modelId
           ? {
               ...member,
-              attribute: replaceAttributePath(member.attribute, field.name, nextName),
+              attribute: replaceBlockConstraintSelectorPaths(
+                member.attribute,
+                field.name,
+                nextName,
+              ),
             }
           : member
       }
@@ -356,24 +481,31 @@ export function updateFieldInProject(
             name: nextTypeName,
             modifier: patch.modifier ?? member.type.modifier,
           },
-          attributes: member.attributes.map((attribute) =>
-            replaceAttributePath(attribute, field.name, nextName),
-          ),
+          attributes: member.attributes,
         }
       }
       if (declaration.id === modelId) {
+        const relationArgumentNames =
+          member.type.name === model.name
+            ? new Set(['fields', 'references'])
+            : new Set(['fields'])
         return {
           ...member,
           attributes: member.attributes.map((attribute) =>
-            replaceAttributePath(attribute, field.name, nextName, new Set(['fields'])),
+            replaceRelationArgumentPaths(
+              attribute,
+              field.name,
+              nextName,
+              relationArgumentNames,
+            ),
           ),
         }
       }
-      if (pointsToRenamedModel) {
+      if (member.type.name === model.name) {
         return {
           ...member,
           attributes: member.attributes.map((attribute) =>
-            replaceAttributePath(
+            replaceRelationArgumentPaths(
               attribute,
               field.name,
               nextName,
@@ -404,6 +536,14 @@ export function deleteFieldFromProject(
   )
   if (!model || !field) return { ok: false, message: '找不到要删除的字段。' }
 
+  const constraintName = fieldConstraintName(model, field)
+  if (constraintName) {
+    return {
+      ok: false,
+      message: `字段“${field.name}”正被 ${constraintName} 约束使用，不能删除。`,
+    }
+  }
+
   const isReferenced = snapshot.graph.relations.some(
     (relation) =>
       (relation.sourceModelId === modelId && relation.fields.includes(field.name)) ||
@@ -420,9 +560,11 @@ export function deleteFieldFromProject(
     isModel(declaration) && declaration.id === modelId
       ? {
           ...declaration,
-          members: declaration.members.filter(
-            (member) => member.kind !== 'field' || member.id !== fieldId,
-          ),
+          members: declaration.members.flatMap((member) => {
+            if (member.kind !== 'field' || member.id !== fieldId) return [member]
+            const comments = detachedComments(member)
+            return comments ? [comments] : []
+          }),
         }
       : declaration,
   )
@@ -445,9 +587,12 @@ export function deleteModelFromProject(
       if (!isModel(declaration)) return declaration
       return {
         ...declaration,
-        members: declaration.members.filter(
-          (member) => member.kind !== 'field' || member.type.name !== model.name,
-        ),
+        members: declaration.members.flatMap((member) => {
+          if (member.kind !== 'field' || member.type.name !== model.name)
+            return [member]
+          const comments = detachedComments(member)
+          return comments ? [comments] : []
+        }),
       }
     })
 
@@ -501,9 +646,22 @@ export function addOneToManyRelation(
   const foreignKeyName =
     selectedForeignKey?.name ?? uniqueFieldName(sourceModel, `${relationFieldName}Id`)
   const inverseName = uniqueFieldName(targetModel, `${lowerFirst(sourceModel.name)}s`)
+  const existingPairRelations = snapshot.graph.relations.filter(
+    (relation) =>
+      (relation.sourceModelId === sourceModel.id &&
+        relation.targetModelId === targetModel.id) ||
+      (relation.sourceModelId === targetModel.id &&
+        relation.targetModelId === sourceModel.id),
+  )
+  const usedRelationNames = new Set(
+    existingPairRelations.flatMap((relation) => (relation.name ? [relation.name] : [])),
+  )
   const relationName =
-    sourceModel.id === targetModel.id
-      ? `${sourceModel.name}${targetModel.name}Relation`
+    sourceModel.id === targetModel.id || existingPairRelations.length > 0
+      ? uniqueRelationName(
+          `${sourceModel.name}${targetModel.name}Relation`,
+          usedRelationNames,
+        )
       : undefined
   const relationArgs: SchemaArgument[] = [
     ...(relationName ? [stringArgument(relationName)] : []),

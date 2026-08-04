@@ -3,11 +3,15 @@ import {
   Braces,
   Clock3,
   Database,
+  Download,
   FileCode2,
+  FileJson2,
   FolderInput,
+  LoaderCircle,
   Moon,
   Network,
   Plus,
+  ShieldAlert,
   Sparkles,
   Sun,
   Trash2,
@@ -16,11 +20,23 @@ import { Dialog } from 'radix-ui'
 import { type DragEvent, type FormEvent, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
+import {
+  downloadPreparedLocalProjectsExport,
+  type PreparedLocalProjectsExportDownload,
+  type ProjectRecord,
+} from '@/db'
 import { createVirtualSchemaFile } from '@/domain/schema'
 import { filesFromFileList } from '@/platform'
 import { useEditorStore } from '@/state'
 
 import { projectTemplates } from './templates'
+
+function createProjectsSignature(projects: readonly ProjectRecord[]): string {
+  return [...projects]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((project) => `${project.id}:${project.updatedAt}:${project.lastOpenedAt}`)
+    .join('|')
+}
 
 export function ProjectHome() {
   const createBlankProject = useEditorStore((state) => state.createBlankProject)
@@ -29,13 +45,20 @@ export function ProjectHome() {
   const theme = useEditorStore((state) => state.theme)
   const setTheme = useEditorStore((state) => state.setTheme)
   const localProjects = useEditorStore((state) => state.localProjects)
+  const projectsHydrated = useEditorStore((state) => state.projectsHydrated)
   const loadLocalProjects = useEditorStore((state) => state.loadLocalProjects)
   const openStoredProject = useEditorStore((state) => state.openStoredProject)
   const deleteLocalProject = useEditorStore((state) => state.deleteLocalProject)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const exportButtonRef = useRef<HTMLButtonElement>(null)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pastedSchema, setPastedSchema] = useState('')
   const [dragging, setDragging] = useState(false)
+  const [exportPreparing, setExportPreparing] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [preparedExport, setPreparedExport] =
+    useState<PreparedLocalProjectsExportDownload>()
+  const [exportSourceSignature, setExportSourceSignature] = useState<string>()
 
   useEffect(() => {
     void loadLocalProjects()
@@ -73,6 +96,80 @@ export function ProjectHome() {
     setPastedSchema('')
   }
 
+  function handleExportOpenChange(open: boolean): void {
+    setExportOpen(open)
+    if (!open) {
+      setPreparedExport(undefined)
+      setExportSourceSignature(undefined)
+    }
+  }
+
+  async function prepareLocalProjectsExport(): Promise<void> {
+    if (exportPreparing) return
+
+    setExportPreparing(true)
+    const sourceSignature = createProjectsSignature(
+      useEditorStore.getState().localProjects,
+    )
+
+    try {
+      const prepared = await useEditorStore
+        .getState()
+        .prepareLocalProjectsExportDownload()
+      const currentSignature = createProjectsSignature(
+        useEditorStore.getState().localProjects,
+      )
+
+      if (sourceSignature !== currentSignature) {
+        toast.warning('本地项目列表刚刚更新', {
+          description: '请再次点击导出，以准备最新数据。',
+        })
+        return
+      }
+
+      setPreparedExport(prepared)
+      setExportSourceSignature(currentSignature)
+      setExportOpen(true)
+    } catch (error) {
+      toast.error('无法准备本地项目数据', {
+        description: error instanceof Error ? error.message : '请稍后重试。',
+      })
+    } finally {
+      setExportPreparing(false)
+    }
+  }
+
+  function confirmLocalProjectsExport(): void {
+    if (!preparedExport || exportSourceSignature === undefined) return
+
+    const currentSignature = createProjectsSignature(
+      useEditorStore.getState().localProjects,
+    )
+    if (currentSignature !== exportSourceSignature) {
+      handleExportOpenChange(false)
+      toast.warning('本地项目列表已更新', {
+        description: '请重新准备导出，以免下载旧数据。',
+      })
+      return
+    }
+
+    try {
+      downloadPreparedLocalProjectsExport(preparedExport)
+      handleExportOpenChange(false)
+      toast.success('本地项目数据已下载')
+    } catch (error) {
+      toast.error('下载没有开始', {
+        description: error instanceof Error ? error.message : '请稍后重试。',
+      })
+    }
+  }
+
+  const exportCounts = {
+    projects: preparedExport?.bundle.projects.length ?? 0,
+    files: preparedExport?.bundle.files.length ?? 0,
+    layouts: preparedExport?.bundle.layouts.length ?? 0,
+  }
+
   return (
     <main
       className={`project-home ${dragging ? 'is-dragging' : ''}`}
@@ -98,6 +195,29 @@ export function ProjectHome() {
         </a>
         <div className="home-header-actions">
           <span className="offline-note">数据只保存在此浏览器</span>
+          {projectsHydrated && (
+            <button
+              ref={exportButtonRef}
+              className="home-export-button"
+              type="button"
+              title="导出本地项目数据"
+              aria-label={
+                exportPreparing ? '正在准备本地项目数据导出' : '导出本地项目数据'
+              }
+              aria-busy={exportPreparing}
+              aria-expanded={exportOpen}
+              aria-haspopup="dialog"
+              disabled={exportPreparing}
+              onClick={() => void prepareLocalProjectsExport()}
+            >
+              {exportPreparing ? (
+                <LoaderCircle className="export-spinner" size={14} />
+              ) : (
+                <Download size={14} />
+              )}
+              <span>{exportPreparing ? '正在准备导出…' : '导出本地项目数据'}</span>
+            </button>
+          )}
           <button
             className="icon-button"
             type="button"
@@ -312,6 +432,83 @@ export function ProjectHome() {
           event.target.value = ''
         }}
       />
+
+      <Dialog.Root open={exportOpen} onOpenChange={handleExportOpenChange}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content
+            className="dialog-content export-dialog"
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+              exportButtonRef.current?.focus()
+            }}
+          >
+            <div className="export-dialog-kicker">
+              <FileJson2 size={14} aria-hidden="true" />
+              LOCAL BACKUP / JSON
+            </div>
+            <Dialog.Title>确认导出本地项目数据</Dialog.Title>
+            <p className="export-dialog-summary">
+              {exportCounts.projects > 0
+                ? '数据已经整理完成。确认后会下载一个可离线保存的 JSON 文件。'
+                : '当前没有本地项目。仍可下载只含格式、版本和空记录的 JSON 文件。'}
+            </p>
+
+            <Dialog.Description asChild>
+              <div className="export-warning">
+                <span className="export-warning-icon" aria-hidden="true">
+                  <ShieldAlert size={16} />
+                </span>
+                <p>
+                  <strong>请先检查敏感信息</strong>
+                  <span>
+                    JSON 会包含每个项目的完整 Prisma Schema
+                    源码。源码中若写有数据库连接字符串、账号、密码或访问令牌，也会被原样导出。请只保存到可信位置，不要直接公开分享。
+                  </span>
+                </p>
+              </div>
+            </Dialog.Description>
+
+            <dl className="export-counts" role="group" aria-label="导出内容统计">
+              <div role="group" aria-label={`项目 ${exportCounts.projects}`}>
+                <dt>项目</dt>
+                <dd>{exportCounts.projects}</dd>
+              </div>
+              <div role="group" aria-label={`文件 ${exportCounts.files}`}>
+                <dt>文件</dt>
+                <dd>{exportCounts.files}</dd>
+              </div>
+              <div role="group" aria-label={`布局 ${exportCounts.layouts}`}>
+                <dt>布局</dt>
+                <dd>{exportCounts.layouts}</dd>
+              </div>
+            </dl>
+
+            {preparedExport && (
+              <div className="export-filename">
+                <span>输出文件</span>
+                <code>{preparedExport.filename}</code>
+              </div>
+            )}
+
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button className="button button-ghost" type="button" autoFocus>
+                  取消
+                </button>
+              </Dialog.Close>
+              <button
+                className="button button-primary"
+                type="button"
+                onClick={confirmLocalProjectsExport}
+              >
+                <Download size={15} />
+                确认并下载 JSON
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       {dragging && (
         <div className="drop-curtain" aria-hidden="true">

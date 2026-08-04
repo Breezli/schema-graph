@@ -75,6 +75,7 @@ export interface SchemaField {
   readonly name: string
   readonly type: SchemaTypeRef
   readonly attributes: readonly SchemaAttribute[]
+  readonly leadingComments?: readonly SchemaComment[]
   readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
@@ -82,6 +83,7 @@ export interface SchemaField {
 export interface BlockAttributeMember {
   readonly kind: 'blockAttribute'
   readonly attribute: SchemaAttribute
+  readonly leadingComments?: readonly SchemaComment[]
   readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
@@ -93,6 +95,8 @@ export interface ModelDeclaration {
   readonly id: string
   readonly name: string
   readonly members: readonly ModelMember[]
+  readonly leadingComments?: readonly SchemaComment[]
+  readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
 
@@ -101,6 +105,7 @@ export interface EnumValueMember {
   readonly id: string
   readonly name: string
   readonly attributes: readonly SchemaAttribute[]
+  readonly leadingComments?: readonly SchemaComment[]
   readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
@@ -112,6 +117,8 @@ export interface EnumDeclaration {
   readonly id: string
   readonly name: string
   readonly members: readonly EnumMember[]
+  readonly leadingComments?: readonly SchemaComment[]
+  readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
 
@@ -120,6 +127,7 @@ export interface ConfigEntryMember {
   readonly id: string
   readonly name: string
   readonly value: SchemaValue
+  readonly leadingComments?: readonly SchemaComment[]
   readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
@@ -131,6 +139,8 @@ export interface ConfigDeclaration {
   readonly id: string
   readonly name: string
   readonly members: readonly ConfigMember[]
+  readonly leadingComments?: readonly SchemaComment[]
+  readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
 
@@ -140,6 +150,8 @@ export interface TypeAliasDeclaration {
   readonly name: string
   readonly type: SchemaTypeRef
   readonly attributes: readonly SchemaAttribute[]
+  readonly leadingComments?: readonly SchemaComment[]
+  readonly trailingComment?: SchemaComment
   readonly source: SourceReference
 }
 
@@ -209,6 +221,14 @@ export interface SchemaLogicalRelation {
     readonly fieldNames: readonly string[]
     readonly referenceNames: readonly string[]
   }
+}
+
+export interface SchemaForeignKeySemantics {
+  readonly childModelId: string
+  readonly parentModelId: string
+  readonly childRelationFieldId: string
+  readonly childFieldNames: readonly string[]
+  readonly parentReferenceNames: readonly string[]
 }
 
 export interface SchemaGraphSnapshot {

@@ -23,6 +23,8 @@ self.addEventListener('message', (event: MessageEvent<SchemaParserWorkerRequest>
   const response: SchemaParserWorkerResponse = {
     protocolVersion: SCHEMA_PARSER_PROTOCOL_VERSION,
     kind: 'parse-schema-project-result',
+    editorSessionId: request.editorSessionId,
+    projectId: request.projectId,
     revision: request.revision,
     result: parseSchemaProject(
       { revision: request.revision, files: request.files },

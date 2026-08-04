@@ -21,6 +21,7 @@ import { Dialog, DropdownMenu } from 'radix-ui'
 import {
   type CSSProperties,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
   useState,
@@ -34,6 +35,8 @@ import { CodePanel } from './CodePanel'
 import { InspectorPanel } from './InspectorPanel'
 import { OnboardingTour } from './OnboardingTour'
 import { SchemaCanvas } from './SchemaCanvas'
+
+const NARROW_WORKSPACE_QUERY = '(max-width: 860px)'
 
 function AddModelDialog({
   open,
@@ -144,9 +147,15 @@ function LayoutDirectionDialog() {
 
 function ResizeHandle({
   side,
+  value,
+  min,
+  max,
   onResize,
 }: {
   readonly side: 'left' | 'right'
+  readonly value: number
+  readonly min: number
+  readonly max: number
   readonly onResize: (percentage: number) => void
 }) {
   function beginResize(event: ReactPointerEvent<HTMLDivElement>): void {
@@ -172,7 +181,32 @@ function ResizeHandle({
     window.addEventListener('pointerup', stop)
   }
 
-  return <div className={`resize-handle resize-${side}`} onPointerDown={beginResize} />
+  function resizeWithKeyboard(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    const direction = side === 'left' ? 1 : -1
+    let nextValue: number | undefined
+    if (event.key === 'ArrowLeft') nextValue = value - direction
+    else if (event.key === 'ArrowRight') nextValue = value + direction
+    else if (event.key === 'Home') nextValue = min
+    else if (event.key === 'End') nextValue = max
+    if (nextValue === undefined) return
+    event.preventDefault()
+    onResize(Math.min(max, Math.max(min, nextValue)))
+  }
+
+  return (
+    <div
+      className={`resize-handle resize-${side}`}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={side === 'left' ? '调整代码面板宽度' : '调整属性面板宽度'}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={value}
+      tabIndex={0}
+      onKeyDown={resizeWithKeyboard}
+      onPointerDown={beginResize}
+    />
+  )
 }
 
 export function Workspace() {
@@ -183,6 +217,7 @@ export function Workspace() {
   const history = useEditorStore((state) => state.history)
   const undo = useEditorStore((state) => state.undo)
   const redo = useEditorStore((state) => state.redo)
+  const retryParse = useEditorStore((state) => state.retryParse)
   const density = useEditorStore((state) => state.density)
   const setDensity = useEditorStore((state) => state.setDensity)
   const theme = useEditorStore((state) => state.theme)
@@ -195,40 +230,75 @@ export function Workspace() {
   const [rightWidth, setRightWidth] = useState(20)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
+  const [isNarrowWorkspace, setIsNarrowWorkspace] = useState(() =>
+    typeof window === 'undefined'
+      ? false
+      : window.matchMedia(NARROW_WORKSPACE_QUERY).matches,
+  )
 
   useEffect(() => {
     void loadOnboardingState()
   }, [loadOnboardingState])
 
   useEffect(() => {
+    const media = window.matchMedia(NARROW_WORKSPACE_QUERY)
+    const updateWorkspaceMode = () => setIsNarrowWorkspace(media.matches)
+    updateWorkspaceMode()
+    media.addEventListener('change', updateWorkspaceMode)
+    return () => media.removeEventListener('change', updateWorkspaceMode)
+  }, [])
+
+  useEffect(() => {
     function handleShortcut(event: KeyboardEvent): void {
       const modifier = event.metaKey || event.ctrlKey
-      if (!modifier || event.key.toLowerCase() !== 'z') return
+      if (!modifier) return
+      if (event.target instanceof Element && event.target.closest('.monaco-editor')) {
+        return
+      }
+      const key = event.key.toLowerCase()
+      const isUndo = key === 'z' && !event.shiftKey
+      const isRedo = (key === 'z' && event.shiftKey) || (key === 'y' && !event.shiftKey)
+      if (!isUndo && !isRedo) return
       event.preventDefault()
-      if (event.shiftKey) redo()
-      else undo()
+      if (isRedo) redo()
+      else if (isUndo) undo()
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
   }, [redo, undo])
 
+  const freshSnapshot =
+    parseState.status === 'valid' && snapshot?.revision === parseState.sourceRevision
+      ? snapshot
+      : undefined
+  const canonicalUnavailableReason =
+    parseState.status === 'parsing'
+      ? 'Schema 正在解析，完成后才能复制或下载最新内容'
+      : parseState.status === 'invalid'
+        ? 'Schema 代码有误，修复后才能复制或下载'
+        : parseState.status === 'error'
+          ? 'Schema 解析服务异常，请重试后再复制或下载'
+          : parseState.status === 'valid'
+            ? 'Schema 版本尚未同步，完成后才能复制或下载最新内容'
+            : 'Schema 尚未完成解析，暂不能复制或下载'
+
   async function copySchema(): Promise<void> {
-    if (!snapshot) {
-      toast.error('当前没有可复制的有效 Schema')
+    if (!freshSnapshot) {
+      toast.error(canonicalUnavailableReason)
       return
     }
-    await navigator.clipboard.writeText(buildCombinedSchema(snapshot))
+    await navigator.clipboard.writeText(buildCombinedSchema(freshSnapshot))
     toast.success('Schema 已复制到剪贴板')
   }
 
   function downloadSchema(): void {
-    if (!snapshot) {
-      toast.error('当前没有可下载的有效 Schema')
+    if (!freshSnapshot) {
+      toast.error(canonicalUnavailableReason)
       return
     }
-    downloadSchemaProject(projectName, snapshot)
+    downloadSchemaProject(projectName, freshSnapshot)
     toast.success(
-      snapshot && Object.keys(snapshot.files).length > 1
+      Object.keys(freshSnapshot.files).length > 1
         ? '多文件项目已打包'
         : 'Schema 已下载',
     )
@@ -238,6 +308,9 @@ export function Workspace() {
     '--left-panel': leftCollapsed ? '0px' : `${leftWidth}%`,
     '--right-panel': rightCollapsed ? '0px' : `${rightWidth}%`,
   } as CSSProperties
+  const renderCodePane = isNarrowWorkspace || !leftCollapsed
+  const renderPropertiesPane = isNarrowWorkspace || !rightCollapsed
+  const themeToggleLabel = theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'
 
   return (
     <main className="workspace-shell">
@@ -247,6 +320,7 @@ export function Workspace() {
             className="icon-button"
             type="button"
             onClick={leaveWorkspace}
+            aria-label="返回项目首页"
             title="返回项目首页"
           >
             <ArrowLeft size={15} />
@@ -262,7 +336,28 @@ export function Workspace() {
                 ? '代码有误，画布只读'
                 : parseState.status === 'parsing'
                   ? '正在同步'
-                  : '已同步'}
+                  : parseState.status === 'error'
+                    ? '解析服务异常，画布只读'
+                    : parseState.status === 'valid'
+                      ? '已同步'
+                      : '等待同步'}
+              {parseState.status === 'error' && (
+                <button
+                  type="button"
+                  onClick={retryParse}
+                  aria-label="重试 Schema 解析"
+                  title="重试 Schema 解析"
+                  style={{
+                    padding: 0,
+                    background: 'transparent',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                  }}
+                >
+                  重试
+                </button>
+              )}
             </span>
           </div>
         </div>
@@ -272,6 +367,7 @@ export function Workspace() {
             type="button"
             onClick={undo}
             disabled={!history.past.length}
+            aria-label="撤销"
             title="撤销 Ctrl+Z"
           >
             <Undo2 size={15} />
@@ -280,6 +376,7 @@ export function Workspace() {
             type="button"
             onClick={redo}
             disabled={!history.future.length}
+            aria-label="重做"
             title="重做 Ctrl+Shift+Z"
           >
             <Redo2 size={15} />
@@ -324,14 +421,20 @@ export function Workspace() {
           <button
             type="button"
             onClick={() => setLeftCollapsed((value) => !value)}
+            aria-label={leftCollapsed ? '展开代码面板' : '折叠代码面板'}
             title={leftCollapsed ? '展开代码面板' : '折叠代码面板'}
+            aria-controls="workspace-code-pane"
+            aria-expanded={!leftCollapsed}
           >
             {leftCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
           </button>
           <button
             type="button"
             onClick={() => setRightCollapsed((value) => !value)}
+            aria-label={rightCollapsed ? '展开属性面板' : '折叠属性面板'}
             title={rightCollapsed ? '展开属性面板' : '折叠属性面板'}
+            aria-controls="workspace-properties-pane"
+            aria-expanded={!rightCollapsed}
           >
             {rightCollapsed ? (
               <PanelRightOpen size={15} />
@@ -343,9 +446,11 @@ export function Workspace() {
 
         <div className="workspace-export">
           <button
-            className="icon-button"
+            className="icon-button workspace-theme-toggle"
             type="button"
             onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            aria-label={themeToggleLabel}
+            title={themeToggleLabel}
           >
             {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
           </button>
@@ -353,6 +458,8 @@ export function Workspace() {
             className="export-button"
             type="button"
             onClick={() => void copySchema()}
+            disabled={!freshSnapshot}
+            title={freshSnapshot ? '复制最新 Schema' : canonicalUnavailableReason}
           >
             <Clipboard size={14} /> 复制
           </button>
@@ -360,6 +467,8 @@ export function Workspace() {
             className="export-button primary"
             type="button"
             onClick={downloadSchema}
+            disabled={!freshSnapshot}
+            title={freshSnapshot ? '下载最新 Schema' : canonicalUnavailableReason}
           >
             <Download size={14} /> 下载
           </button>
@@ -371,26 +480,42 @@ export function Workspace() {
         style={workspaceStyle}
         data-mobile-tab={mobileTab}
       >
-        <div className="workspace-pane pane-code">
-          <CodePanel />
+        <div
+          id="workspace-code-pane"
+          className="workspace-pane pane-code"
+          data-collapsed={!renderCodePane || undefined}
+          aria-hidden={!renderCodePane || undefined}
+        >
+          {renderCodePane && <CodePanel />}
         </div>
         {!leftCollapsed && (
           <ResizeHandle
             side="left"
+            value={leftWidth}
+            min={16}
+            max={40}
             onResize={(value) => setLeftWidth(Math.min(40, Math.max(16, value)))}
           />
         )}
-        <div className="workspace-pane pane-canvas">
+        <div id="workspace-canvas-pane" className="workspace-pane pane-canvas">
           <SchemaCanvas onRequestAddModel={() => setAddModelOpen(true)} />
         </div>
         {!rightCollapsed && (
           <ResizeHandle
             side="right"
+            value={rightWidth}
+            min={16}
+            max={34}
             onResize={(value) => setRightWidth(Math.min(34, Math.max(16, value)))}
           />
         )}
-        <div className="workspace-pane pane-properties">
-          <InspectorPanel />
+        <div
+          id="workspace-properties-pane"
+          className="workspace-pane pane-properties"
+          data-collapsed={!renderPropertiesPane || undefined}
+          aria-hidden={!renderPropertiesPane || undefined}
+        >
+          {renderPropertiesPane && <InspectorPanel />}
         </div>
       </div>
 
@@ -399,6 +524,7 @@ export function Workspace() {
           type="button"
           className={mobileTab === 'code' ? 'is-active' : ''}
           onClick={() => setMobileTab('code')}
+          aria-pressed={mobileTab === 'code'}
         >
           <Code2 size={16} /> 代码
         </button>
@@ -406,6 +532,7 @@ export function Workspace() {
           type="button"
           className={mobileTab === 'canvas' ? 'is-active' : ''}
           onClick={() => setMobileTab('canvas')}
+          aria-pressed={mobileTab === 'canvas'}
         >
           <Network size={16} /> 画布
         </button>
@@ -413,8 +540,19 @@ export function Workspace() {
           type="button"
           className={mobileTab === 'properties' ? 'is-active' : ''}
           onClick={() => setMobileTab('properties')}
+          aria-pressed={mobileTab === 'properties'}
         >
           <PanelRightOpen size={16} /> 属性
+        </button>
+        <button
+          type="button"
+          className="mobile-theme-toggle"
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          aria-label={themeToggleLabel}
+          title={themeToggleLabel}
+        >
+          {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+          <span>主题</span>
         </button>
       </nav>
 

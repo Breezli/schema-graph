@@ -8,7 +8,12 @@ import {
 } from '@xyflow/react'
 
 import type { RelationCardinality, SchemaLogicalRelation } from '@/domain/schema'
-import type { EdgeStyle, RelationNotation } from '@/state'
+import {
+  resolveEdgeStyle,
+  resolveRelationNotation,
+  type EdgeStyle,
+  type RelationNotation,
+} from '@/state'
 
 export interface LogicalRelationEdgeData extends Record<string, unknown> {
   readonly relation: SchemaLogicalRelation
@@ -69,7 +74,7 @@ export function LogicalRelationEdge({
   selected,
 }: EdgeProps<LogicalFlowEdge>) {
   const pathResult =
-    data?.lineStyle === 'bezier'
+    resolveEdgeStyle(data?.lineStyle) === 'bezier'
       ? getBezierPath({
           sourceX,
           sourceY,
@@ -109,7 +114,7 @@ export function LogicalRelationEdge({
         >
           <CardinalityMark
             cardinality={data?.relation.source.cardinality ?? 'one'}
-            notation={data?.notation ?? 'crowfoot'}
+            notation={resolveRelationNotation(data?.notation)}
           />
         </div>
         <div
@@ -120,7 +125,7 @@ export function LogicalRelationEdge({
         >
           <CardinalityMark
             cardinality={data?.relation.target.cardinality ?? 'one'}
-            notation={data?.notation ?? 'crowfoot'}
+            notation={resolveRelationNotation(data?.notation)}
           />
         </div>
         {data?.label && (

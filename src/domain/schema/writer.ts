@@ -26,6 +26,29 @@ function formatCommentBlock(member: CommentMember, indent = ''): string {
     .join('\n')
 }
 
+function withLeadingComments(
+  value: string,
+  comments?: readonly SchemaComment[],
+  indent = '',
+): string {
+  if (!comments?.length) return value
+  const leading = comments
+    .map((comment) => `${indent}${formatComment(comment)}`)
+    .join('\n')
+  return `${leading}\n${value}`
+}
+
+function joinMembers(
+  members: readonly { readonly standalone: boolean; readonly value: string }[],
+): string {
+  return members.reduce((content, member, index) => {
+    if (index === 0) return member.value
+    const previous = members[index - 1]
+    const separator = previous?.standalone || member.standalone ? '\n\n' : '\n'
+    return `${content}${separator}${member.value}`
+  }, '')
+}
+
 export function formatSchemaValue(value: SchemaValue): string {
   switch (value.kind) {
     case 'literal':
@@ -75,26 +98,44 @@ function formatField(field: SchemaField): string {
     formatSchemaAttribute(attribute),
   )
   const suffix = attributes.length ? ` ${attributes.join(' ')}` : ''
-  return withTrailingComment(
-    `  ${field.name} ${formatSchemaType(field.type)}${suffix}`,
-    field.trailingComment,
+  return withLeadingComments(
+    withTrailingComment(
+      `  ${field.name} ${formatSchemaType(field.type)}${suffix}`,
+      field.trailingComment,
+    ),
+    field.leadingComments,
+    '  ',
   )
 }
 
 function formatBlockAttribute(member: BlockAttributeMember): string {
-  return withTrailingComment(
-    `  ${formatSchemaAttribute(member.attribute, true)}`,
-    member.trailingComment,
+  return withLeadingComments(
+    withTrailingComment(
+      `  ${formatSchemaAttribute(member.attribute, true)}`,
+      member.trailingComment,
+    ),
+    member.leadingComments,
+    '  ',
   )
 }
 
 function formatModel(declaration: ModelDeclaration): string {
   const members = declaration.members.map((member) => {
-    if (member.kind === 'field') return formatField(member)
-    if (member.kind === 'blockAttribute') return formatBlockAttribute(member)
-    return formatCommentBlock(member, '  ')
+    if (member.kind === 'field') {
+      return { standalone: false, value: formatField(member) }
+    }
+    if (member.kind === 'blockAttribute') {
+      return { standalone: false, value: formatBlockAttribute(member) }
+    }
+    return { standalone: true, value: formatCommentBlock(member, '  ') }
   })
-  return `${declaration.kind} ${declaration.name} {\n${members.join('\n')}\n}`
+  return withTrailingComment(
+    withLeadingComments(
+      `${declaration.kind} ${declaration.name} {\n${joinMembers(members)}\n}`,
+      declaration.leadingComments,
+    ),
+    declaration.trailingComment,
+  )
 }
 
 function formatEnumValue(member: EnumValueMember): string {
@@ -102,32 +143,56 @@ function formatEnumValue(member: EnumValueMember): string {
     formatSchemaAttribute(attribute),
   )
   const suffix = attributes.length ? ` ${attributes.join(' ')}` : ''
-  return withTrailingComment(`  ${member.name}${suffix}`, member.trailingComment)
+  return withLeadingComments(
+    withTrailingComment(`  ${member.name}${suffix}`, member.trailingComment),
+    member.leadingComments,
+    '  ',
+  )
 }
 
 function formatEnum(declaration: EnumDeclaration): string {
   const members = declaration.members.map((member) => {
-    if (member.kind === 'enumValue') return formatEnumValue(member)
-    if (member.kind === 'blockAttribute') return formatBlockAttribute(member)
-    return formatCommentBlock(member, '  ')
+    if (member.kind === 'enumValue') {
+      return { standalone: false, value: formatEnumValue(member) }
+    }
+    if (member.kind === 'blockAttribute') {
+      return { standalone: false, value: formatBlockAttribute(member) }
+    }
+    return { standalone: true, value: formatCommentBlock(member, '  ') }
   })
-  return `enum ${declaration.name} {\n${members.join('\n')}\n}`
+  return withTrailingComment(
+    withLeadingComments(
+      `enum ${declaration.name} {\n${joinMembers(members)}\n}`,
+      declaration.leadingComments,
+    ),
+    declaration.trailingComment,
+  )
 }
 
 function formatConfigEntry(member: ConfigEntryMember): string {
-  return withTrailingComment(
-    `  ${member.name} = ${formatSchemaValue(member.value)}`,
-    member.trailingComment,
+  return withLeadingComments(
+    withTrailingComment(
+      `  ${member.name} = ${formatSchemaValue(member.value)}`,
+      member.trailingComment,
+    ),
+    member.leadingComments,
+    '  ',
   )
 }
 
 function formatConfig(declaration: ConfigDeclaration): string {
   const members = declaration.members.map((member) =>
     member.kind === 'config'
-      ? formatConfigEntry(member)
-      : formatCommentBlock(member, '  '),
+      ? { standalone: false, value: formatConfigEntry(member) }
+      : { standalone: true, value: formatCommentBlock(member, '  ') },
   )
-  return `${declaration.kind} ${declaration.name} {\n${members.join('\n')}\n}`
+  return withTrailingComment(
+    withLeadingComments(
+      `${declaration.kind} ${declaration.name} {\n${joinMembers(members)}\n}`,
+      declaration.leadingComments,
+    ),
+    declaration.trailingComment,
+  )
 }
 
 function formatTypeAlias(declaration: TypeAliasDeclaration): string {
@@ -135,7 +200,13 @@ function formatTypeAlias(declaration: TypeAliasDeclaration): string {
     formatSchemaAttribute(attribute),
   )
   const suffix = attributes.length ? ` ${attributes.join(' ')}` : ''
-  return `type ${declaration.name} = ${formatSchemaType(declaration.type)}${suffix}`
+  return withTrailingComment(
+    withLeadingComments(
+      `type ${declaration.name} = ${formatSchemaType(declaration.type)}${suffix}`,
+      declaration.leadingComments,
+    ),
+    declaration.trailingComment,
+  )
 }
 
 export function formatSchemaDeclaration(declaration: SchemaDeclaration): string {

@@ -40,13 +40,27 @@ function safeFileName(value: string): string {
   )
 }
 
+function safePrismaFileName(path: string): string {
+  const basename = path.trim().split(/[\\/]/).at(-1) ?? ''
+  const stem = basename
+    .replace(/\.prisma$/i, '')
+    .replaceAll(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replaceAll(/^[._-]+|[._-]+$/g, '')
+  return stem ? `${stem}.prisma` : 'schema.prisma'
+}
+
 function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
   anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(url)
+  document.body.append(anchor)
+  try {
+    anchor.click()
+  } finally {
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
 }
 
 export function downloadSchemaProject(
@@ -60,7 +74,10 @@ export function downloadSchemaProject(
     const content = file
       ? serializeVirtualSchemaFile(file, canonicalContent)
       : canonicalContent
-    downloadBlob(new Blob([content], { type: 'text/plain;charset=utf-8' }), path)
+    downloadBlob(
+      new Blob([content], { type: 'text/plain;charset=utf-8' }),
+      safePrismaFileName(path),
+    )
     return
   }
 

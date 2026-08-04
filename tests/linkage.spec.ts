@@ -7,6 +7,11 @@ async function openContentWorkspace(page: Page, closeTour = true): Promise<void>
   await expect(page.locator('.schema-node')).toHaveCount(8, { timeout: 15_000 })
   const tourClose = page.getByRole('button', { name: '关闭新手指引' })
   if (closeTour && (await tourClose.isVisible())) await tourClose.click()
+  await expect(page.locator('.canvas-panel')).toHaveAttribute(
+    'data-initial-fit-status',
+    'complete',
+    { timeout: 30_000 },
+  )
 }
 
 async function viewport(page: Page) {
@@ -70,7 +75,9 @@ test('links field and logical-edge selections to cards and one or two Monaco pan
   page,
 }) => {
   await openContentWorkspace(page)
-  const postNode = page.locator('.schema-node').filter({ hasText: /^Post/ })
+  const postNode = page.locator('.schema-node').filter({
+    has: page.locator('header strong', { hasText: /^Post$/ }),
+  })
   const authorField = postNode
     .locator('.schema-field-row')
     .filter({ hasText: /^authorUser/ })
@@ -82,7 +89,18 @@ test('links field and logical-edge selections to cards and one or two Monaco pan
     .getByRole('group', { name: /Edge from .*Post to .*User/ })
     .locator('.react-flow__edge-interaction')
   await clickVisiblePath(page, relationPath)
-  await expect(page.locator('.editor-column.is-split .editor-pane')).toHaveCount(2)
+  const splitPanes = page.locator('.editor-column.is-split .editor-pane')
+  await expect(splitPanes).toHaveCount(2)
+  await expect(splitPanes.nth(0).locator('.editor-filebar')).toContainText(
+    'models/content.prisma',
+  )
+  await expect(splitPanes.nth(1).locator('.editor-filebar')).toContainText(
+    'models/identity.prisma',
+  )
+  await expect(
+    splitPanes.nth(0).locator('.monaco-selected-source-line').first(),
+  ).toBeVisible()
+  await expect(splitPanes.nth(1).locator('.monaco-linked-peer-line')).toBeVisible()
   const selectedRows = await page
     .locator('.schema-field-row.is-selected')
     .evaluateAll((rows) =>
@@ -103,6 +121,26 @@ test('links field and logical-edge selections to cards and one or two Monaco pan
   await expect(page.locator('.monaco-linked-peer-line').first()).toBeVisible()
   await expect(page.locator('.edge-cardinality')).not.toHaveCount(0)
   await expect(page.locator('.logical-edge-label').first()).toContainText('FK')
+
+  const userPostsField = page
+    .locator('.schema-node')
+    .filter({ hasText: /^User/ })
+    .locator('.schema-field-row')
+    .filter({ hasText: /^posts/ })
+  await userPostsField.click()
+  await expect(postNode).toHaveClass(/is-fk-child/)
+  await expect(splitPanes).toHaveCount(2)
+  await expect(splitPanes.nth(0).locator('.editor-filebar')).toContainText(
+    'models/identity.prisma',
+  )
+  await expect(splitPanes.nth(1).locator('.editor-filebar')).toContainText(
+    'models/content.prisma',
+  )
+  await expect(splitPanes.nth(0).locator('.monaco-selected-source-line')).toBeVisible()
+  await expect(splitPanes.nth(0).locator('.monaco-linked-peer-line')).toHaveCount(0)
+  await expect(
+    splitPanes.nth(1).locator('.monaco-linked-peer-line').first(),
+  ).toBeVisible()
 
   await page.getByRole('tab', { name: '外观' }).click()
   await page.getByRole('button', { name: '数字' }).click()

@@ -9,6 +9,14 @@ import type {
   RelationLabelMode,
 } from '@/state/editor-store'
 
+import {
+  createPreparedLocalProjectsExportDownload,
+  createLocalProjectsExportBundle,
+  downloadLocalProjectsExportBundle,
+  type LocalProjectsExportBundle,
+  type PreparedLocalProjectsExportDownload,
+} from './local-project-export'
+
 export interface ProjectRecord {
   readonly id: string
   readonly name: string
@@ -174,6 +182,48 @@ export async function deletePersistedProject(id: string): Promise<void> {
     await db.files.where('projectId').equals(id).delete()
     await db.layouts.delete(id)
   })
+}
+
+export async function readLocalProjectsExportBundle(
+  exportedAt = new Date(),
+): Promise<LocalProjectsExportBundle> {
+  const db = getDatabase()
+  if (!db) {
+    return createLocalProjectsExportBundle(
+      { projects: [], files: [], layouts: [] },
+      exportedAt,
+    )
+  }
+
+  const records = await db.transaction(
+    'r',
+    db.projects,
+    db.files,
+    db.layouts,
+    async () => {
+      const [projects, files, layouts] = await Promise.all([
+        db.projects.toArray(),
+        db.files.toArray(),
+        db.layouts.toArray(),
+      ])
+      return { projects, files, layouts }
+    },
+  )
+  return createLocalProjectsExportBundle(records, exportedAt)
+}
+
+export async function downloadLocalProjectsExport(
+  exportedAt = new Date(),
+): Promise<void> {
+  downloadLocalProjectsExportBundle(await readLocalProjectsExportBundle(exportedAt))
+}
+
+export async function prepareLocalProjectsExportDownload(
+  exportedAt = new Date(),
+): Promise<PreparedLocalProjectsExportDownload> {
+  return createPreparedLocalProjectsExportDownload(
+    await readLocalProjectsExportBundle(exportedAt),
+  )
 }
 
 export async function saveSetting(key: string, value: string): Promise<void> {

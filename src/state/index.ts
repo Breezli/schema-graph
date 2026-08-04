@@ -1,3 +1,5 @@
 export * from './history'
 export * from './editor-store'
 export * from './schema-session'
+export * from './position-reconciliation'
+export * from './persistence-coordinator'

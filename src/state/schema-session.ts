@@ -4,20 +4,31 @@ import type {
   SchemaProjectSnapshot,
   VirtualSchemaFile,
 } from '@/domain/schema'
-import type { SchemaParserWorkerResponse } from '@/workers'
+import type { SchemaParserRequestIdentity, SchemaParserWorkerResponse } from '@/workers'
+
+export interface SchemaParseFailure {
+  readonly message: string
+  readonly retryable: true
+}
 
 export interface SchemaSessionParseState {
+  readonly editorSessionId: number
+  readonly projectId?: string
   readonly sourceRevision: number
   readonly sourceFiles: readonly VirtualSchemaFile[]
-  readonly status: 'idle' | 'parsing' | 'valid' | 'invalid'
+  readonly status: 'idle' | 'parsing' | 'valid' | 'invalid' | 'error'
   readonly diagnostics: readonly SchemaDiagnostic[]
   readonly lastValidSnapshot?: SchemaProjectSnapshot
+  readonly failure?: SchemaParseFailure
 }
 
 export function createSchemaSessionParseState(
   sourceFiles: readonly VirtualSchemaFile[] = [],
+  identity: { readonly editorSessionId?: number; readonly projectId?: string } = {},
 ): SchemaSessionParseState {
   return {
+    editorSessionId: identity.editorSessionId ?? 0,
+    projectId: identity.projectId,
     sourceRevision: 0,
     sourceFiles,
     status: 'idle',
@@ -34,6 +45,7 @@ export function beginSchemaParse(
     sourceRevision: state.sourceRevision + 1,
     sourceFiles,
     status: 'parsing',
+    failure: undefined,
   }
 }
 
@@ -50,6 +62,7 @@ export function applySchemaParseResult(
       status: 'valid',
       diagnostics: result.diagnostics,
       lastValidSnapshot: result.snapshot,
+      failure: undefined,
     }
   }
 
@@ -57,6 +70,35 @@ export function applySchemaParseResult(
     ...state,
     status: 'invalid',
     diagnostics: result.diagnostics,
+    failure: undefined,
+  }
+}
+
+export function applySchemaParseFailure(
+  state: SchemaSessionParseState,
+  identity: SchemaParserRequestIdentity,
+  error: unknown,
+): SchemaSessionParseState {
+  if (
+    identity.editorSessionId !== state.editorSessionId ||
+    identity.projectId !== state.projectId ||
+    identity.revision !== state.sourceRevision
+  ) {
+    return state
+  }
+
+  const message = error instanceof Error ? error.message : String(error)
+  return {
+    ...state,
+    status: 'error',
+    diagnostics: [
+      {
+        severity: 'error',
+        code: 'schema-parser-worker-failure',
+        message,
+      },
+    ],
+    failure: { message, retryable: true },
   }
 }
 
@@ -64,7 +106,13 @@ export function applySchemaWorkerResponse(
   state: SchemaSessionParseState,
   response: SchemaParserWorkerResponse,
 ): SchemaSessionParseState {
-  if (response.revision !== state.sourceRevision) return state
+  if (
+    response.editorSessionId !== state.editorSessionId ||
+    response.projectId !== state.projectId ||
+    response.revision !== state.sourceRevision
+  ) {
+    return state
+  }
   return applySchemaParseResult(state, response.result)
 }
 

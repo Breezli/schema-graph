@@ -1,6 +1,7 @@
 export * from './analyzer'
 export * from './ports'
 export * from './project-parser'
+export * from './relation-semantics'
 export * from './transactions'
 export * from './types'
 export * from './values'

@@ -90,11 +90,105 @@ function mapComment(comment: TrailingComment, filePath: string): SchemaComment {
   }
 }
 
-function mapCommentBlock(block: CommentBlock, filePath: string): CommentMember {
-  return {
-    kind: 'commentBlock',
-    comments: block.comments.map((comment) => mapComment(comment, filePath)),
+type ParserLocatedNode = {
+  readonly kind: string
+  readonly location?: ParserSourceRange
+}
+
+function groupComments(comments: readonly SchemaComment[]): CommentMember[] {
+  const groups: SchemaComment[][] = []
+
+  for (const comment of comments) {
+    const previous = groups.at(-1)?.at(-1)
+    const previousRange = previous?.source?.range
+    const currentRange = comment.source?.range
+    if (
+      previous &&
+      previousRange &&
+      currentRange &&
+      currentRange.start.line === previousRange.end.line + 1
+    ) {
+      groups.at(-1)?.push(comment)
+    } else {
+      groups.push([comment])
+    }
   }
+
+  return groups.map((comments) => ({ kind: 'commentBlock', comments }))
+}
+
+function splitCommentBlock(block: CommentBlock, filePath: string): CommentMember[] {
+  return groupComments(block.comments.map((entry) => mapComment(entry, filePath)))
+}
+
+function isImmediatelyBefore(
+  comments: CommentMember,
+  location?: ParserSourceRange,
+): boolean {
+  const lastRange = comments.comments.at(-1)?.source?.range
+  return Boolean(
+    location && lastRange && lastRange.end.line + 1 === location.start.line,
+  )
+}
+
+function mapCommentableSequence<
+  TNode extends ParserLocatedNode,
+  TResult extends { readonly kind: string },
+>(
+  nodes: readonly TNode[],
+  filePath: string,
+  mapNode: (
+    node: Exclude<TNode, CommentBlock>,
+    leadingComments?: readonly SchemaComment[],
+  ) => TResult,
+  attachTrailingComment?: (value: TResult, comment: SchemaComment) => TResult,
+): Array<TResult | CommentMember> {
+  const mapped: Array<TResult | CommentMember> = []
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]
+    if (!node) continue
+    if (node.kind !== 'commentBlock') {
+      mapped.push(mapNode(node as Exclude<TNode, CommentBlock>))
+      continue
+    }
+
+    let groups = splitCommentBlock(node as unknown as CommentBlock, filePath)
+    const previous = nodes[index - 1]
+    const firstComment = groups[0]?.comments[0]
+    if (
+      attachTrailingComment &&
+      previous &&
+      previous.kind !== 'commentBlock' &&
+      previous.location &&
+      firstComment?.source?.range?.start.line === previous.location.end.line
+    ) {
+      const previousValue = mapped.at(-1)
+      if (previousValue && previousValue.kind !== 'commentBlock') {
+        mapped[mapped.length - 1] = attachTrailingComment(
+          previousValue as TResult,
+          firstComment,
+        )
+      }
+      groups = groupComments(groups.flatMap((group) => group.comments).slice(1))
+    }
+    const next = nodes[index + 1]
+    const finalGroup = groups.at(-1)
+    if (
+      next &&
+      next.kind !== 'commentBlock' &&
+      finalGroup &&
+      isImmediatelyBefore(finalGroup, next.location)
+    ) {
+      mapped.push(...groups.slice(0, -1))
+      mapped.push(mapNode(next as Exclude<TNode, CommentBlock>, finalGroup.comments))
+      index += 1
+    } else {
+      mapped.push(...groups)
+    }
+  }
+
+  return mapped
 }
 
 function mapArgument(argument: ParserSchemaArgument, filePath: string): SchemaArgument {
@@ -173,6 +267,7 @@ function mapField(
   field: FieldDeclaration,
   filePath: string,
   declarationId: string,
+  leadingComments?: readonly SchemaComment[],
 ): SchemaField {
   return {
     kind: 'field',
@@ -182,6 +277,7 @@ function mapField(
     attributes: (field.attributes ?? []).map((attribute) =>
       mapAttribute(attribute, filePath),
     ),
+    leadingComments,
     trailingComment: field.comment ? mapComment(field.comment, filePath) : undefined,
     source: sourceReference(filePath, field.location),
   }
@@ -190,10 +286,12 @@ function mapField(
 function mapBlockAttribute(
   attribute: BlockAttribute,
   filePath: string,
+  leadingComments?: readonly SchemaComment[],
 ): BlockAttributeMember {
   return {
     kind: 'blockAttribute',
     attribute: mapAttribute(attribute, filePath),
+    leadingComments,
     trailingComment: attribute.comment
       ? mapComment(attribute.comment, filePath)
       : undefined,
@@ -204,6 +302,7 @@ function mapBlockAttribute(
 function mapModel(
   declaration: ParserModelDeclaration,
   filePath: string,
+  leadingComments?: readonly SchemaComment[],
 ): ModelDeclaration {
   const declarationId = createId(
     filePath,
@@ -211,17 +310,23 @@ function mapModel(
     declaration.name.value,
     declaration.location,
   )
-  const members: ModelMember[] = declaration.members.map((member) => {
-    if (member.kind === 'field') return mapField(member, filePath, declarationId)
-    if (member.kind === 'blockAttribute') return mapBlockAttribute(member, filePath)
-    return mapCommentBlock(member, filePath)
-  })
+  const members = mapCommentableSequence(
+    declaration.members,
+    filePath,
+    (member, memberLeadingComments): Exclude<ModelMember, CommentMember> => {
+      if (member.kind === 'field') {
+        return mapField(member, filePath, declarationId, memberLeadingComments)
+      }
+      return mapBlockAttribute(member, filePath, memberLeadingComments)
+    },
+  )
 
   return {
     kind: declaration.kind,
     id: declarationId,
     name: declaration.name.value,
     members,
+    leadingComments,
     source: sourceReference(filePath, declaration.location),
   }
 }
@@ -230,6 +335,7 @@ function mapEnumValue(
   value: EnumValue,
   filePath: string,
   declarationId: string,
+  leadingComments?: readonly SchemaComment[],
 ): EnumValueMember {
   return {
     kind: 'enumValue',
@@ -238,6 +344,7 @@ function mapEnumValue(
     attributes: (value.attributes ?? []).map((attribute) =>
       mapAttribute(attribute, filePath),
     ),
+    leadingComments,
     trailingComment: value.comment ? mapComment(value.comment, filePath) : undefined,
     source: sourceReference(filePath, value.location),
   }
@@ -246,6 +353,7 @@ function mapEnumValue(
 function mapEnum(
   declaration: ParserEnumDeclaration,
   filePath: string,
+  leadingComments?: readonly SchemaComment[],
 ): EnumDeclaration {
   const declarationId = createId(
     filePath,
@@ -253,18 +361,23 @@ function mapEnum(
     declaration.name.value,
     declaration.location,
   )
-  const members: EnumMember[] = declaration.members.map((member) => {
-    if (member.kind === 'enumValue')
-      return mapEnumValue(member, filePath, declarationId)
-    if (member.kind === 'blockAttribute') return mapBlockAttribute(member, filePath)
-    return mapCommentBlock(member, filePath)
-  })
+  const members = mapCommentableSequence(
+    declaration.members,
+    filePath,
+    (member, memberLeadingComments): Exclude<EnumMember, CommentMember> => {
+      if (member.kind === 'enumValue') {
+        return mapEnumValue(member, filePath, declarationId, memberLeadingComments)
+      }
+      return mapBlockAttribute(member, filePath, memberLeadingComments)
+    },
+  )
 
   return {
     kind: 'enum',
     id: declarationId,
     name: declaration.name.value,
     members,
+    leadingComments,
     source: sourceReference(filePath, declaration.location),
   }
 }
@@ -273,18 +386,24 @@ function mapConfigEntry(
   entry: Config,
   filePath: string,
   declarationId: string,
+  leadingComments?: readonly SchemaComment[],
 ): ConfigEntryMember {
   return {
     kind: 'config',
     id: createMemberId(declarationId, 'config', entry.name.value, entry.location),
     name: entry.name.value,
     value: mapValue(entry.value, filePath),
+    leadingComments,
     trailingComment: entry.comment ? mapComment(entry.comment, filePath) : undefined,
     source: sourceReference(filePath, entry.location),
   }
 }
 
-function mapConfig(declaration: ConfigBlock, filePath: string): ConfigDeclaration {
+function mapConfig(
+  declaration: ConfigBlock,
+  filePath: string,
+  leadingComments?: readonly SchemaComment[],
+): ConfigDeclaration {
   const declarationId = createId(
     filePath,
     declaration.kind,
@@ -295,16 +414,22 @@ function mapConfig(declaration: ConfigBlock, filePath: string): ConfigDeclaratio
     kind: declaration.kind,
     id: declarationId,
     name: declaration.name.value,
-    members: declaration.members.map((member) =>
-      member.kind === 'config'
-        ? mapConfigEntry(member, filePath, declarationId)
-        : mapCommentBlock(member, filePath),
+    members: mapCommentableSequence(
+      declaration.members,
+      filePath,
+      (member, memberLeadingComments) =>
+        mapConfigEntry(member, filePath, declarationId, memberLeadingComments),
     ),
+    leadingComments,
     source: sourceReference(filePath, declaration.location),
   }
 }
 
-function mapTypeAlias(declaration: TypeAlias, filePath: string): TypeAliasDeclaration {
+function mapTypeAlias(
+  declaration: TypeAlias,
+  filePath: string,
+  leadingComments?: readonly SchemaComment[],
+): TypeAliasDeclaration {
   return {
     kind: 'typeAlias',
     id: createId(filePath, 'typeAlias', declaration.name.value, declaration.location),
@@ -313,29 +438,36 @@ function mapTypeAlias(declaration: TypeAlias, filePath: string): TypeAliasDeclar
     attributes: (declaration.attributes ?? []).map((attribute) =>
       mapAttribute(attribute, filePath),
     ),
+    leadingComments,
     source: sourceReference(filePath, declaration.location),
   }
 }
 
 function mapDeclaration(
-  declaration: ParserSchemaDeclaration,
+  declaration: Exclude<ParserSchemaDeclaration, CommentBlock>,
   filePath: string,
-): SchemaDeclaration {
+  leadingComments?: readonly SchemaComment[],
+): Exclude<SchemaDeclaration, CommentMember> {
   switch (declaration.kind) {
     case 'model':
     case 'view':
     case 'type':
-      return mapModel(declaration, filePath)
+      return mapModel(declaration, filePath, leadingComments)
     case 'enum':
-      return mapEnum(declaration, filePath)
+      return mapEnum(declaration, filePath, leadingComments)
     case 'datasource':
     case 'generator':
-      return mapConfig(declaration, filePath)
+      return mapConfig(declaration, filePath, leadingComments)
     case 'typeAlias':
-      return mapTypeAlias(declaration, filePath)
-    case 'commentBlock':
-      return mapCommentBlock(declaration, filePath)
+      return mapTypeAlias(declaration, filePath, leadingComments)
   }
+}
+
+function withTrailingComment(
+  declaration: Exclude<SchemaDeclaration, CommentMember>,
+  trailingComment: SchemaComment,
+): Exclude<SchemaDeclaration, CommentMember> {
+  return { ...declaration, trailingComment }
 }
 
 interface ParserSyntaxError extends Error {
@@ -357,8 +489,12 @@ export class LoancrateSchemaParser implements SchemaParserPort {
   parseFile(file: VirtualSchemaFile): ParseFileResult {
     try {
       const ast = parsePrismaSchema(file.content)
-      const declarations = ast.declarations.map((declaration) =>
-        mapDeclaration(declaration, file.path),
+      const declarations = mapCommentableSequence(
+        ast.declarations,
+        file.path,
+        (declaration, leadingComments) =>
+          mapDeclaration(declaration, file.path, leadingComments),
+        withTrailingComment,
       )
       return {
         ok: true,

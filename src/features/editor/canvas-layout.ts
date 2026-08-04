@@ -6,7 +6,10 @@ export type VisualDeclaration = Exclude<
   { readonly kind: 'commentBlock' }
 >
 
-function declarationDimensions(declaration: VisualDeclaration, density: NodeDensity) {
+export function declarationDimensions(
+  declaration: VisualDeclaration,
+  density: NodeDensity,
+) {
   if (
     declaration.kind === 'model' ||
     declaration.kind === 'view' ||

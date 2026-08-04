@@ -251,6 +251,27 @@ function relationCardinality(
   return cardinality
 }
 
+function isValidForeignKeyRelation(relation: SchemaRelation): boolean {
+  return (
+    relation.fields.length > 0 &&
+    relation.references.length > 0 &&
+    relation.fields.length === relation.references.length
+  )
+}
+
+function isUnqualifiedInverseRelation(
+  relation: SchemaRelation,
+  foreignKeyRelation: SchemaRelation,
+): boolean {
+  return (
+    relation.id !== foreignKeyRelation.id &&
+    relation.sourceModelId === foreignKeyRelation.targetModelId &&
+    relation.targetModelId === foreignKeyRelation.sourceModelId &&
+    relation.fields.length === 0 &&
+    relation.references.length === 0
+  )
+}
+
 function isUniqueFieldSet(
   model: ModelDeclaration,
   fieldNames: readonly string[],
@@ -306,15 +327,15 @@ function buildLogicalRelations(
   }
 
   return [...groups.entries()].map(([groupKey, members]) => {
-    const foreignKeyRelation = members.find((member) => member.fields.length > 0)
+    const foreignKeyRelations = members.filter(isValidForeignKeyRelation)
+    const foreignKeyRelation =
+      foreignKeyRelations.length === 1 ? foreignKeyRelations[0] : undefined
     const first = foreignKeyRelation ?? members[0]
     if (!first) throw new Error(`Empty logical relation group: ${groupKey}`)
-    const inverse = members.find(
-      (member) =>
-        member.id !== first.id &&
-        member.sourceModelId === first.targetModelId &&
-        member.targetModelId === first.sourceModelId,
+    const inverseCandidates = members.filter((member) =>
+      isUnqualifiedInverseRelation(member, first),
     )
+    const inverse = inverseCandidates.length === 1 ? inverseCandidates[0] : undefined
     const sourceModel = modelById.get(first.sourceModelId)
     const targetModel = modelById.get(first.targetModelId)
     if (!sourceModel || !targetModel) {
