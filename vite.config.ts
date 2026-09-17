@@ -9,6 +9,7 @@ import { VitePWA } from 'vite-plugin-pwa'
 const rootDirectory = path.dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
+  base: '/schema-graph/',
   plugins: [
     react(),
     tailwindcss(),
